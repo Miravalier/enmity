@@ -2,7 +2,7 @@ from typing import Dict
 import aiohttp
 
 
-PROJECT_URL = "https://github.com/Miravalier/discordbot.git"
+PROJECT_URL = "https://github.com/Miravalier/enmity.git"
 VERSION = "0.0.1"
 USER_AGENT = f"DiscordBot ({PROJECT_URL} {VERSION})"
 
