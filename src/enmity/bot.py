@@ -56,6 +56,7 @@ class Bot:
     encoding = "json"
 
     def __init__(self):
+        self.application_id: int = None
         self.guilds: Set[int] = set()
         self.rate_limits: Dict[str, RateLimit] = {}
         self.rate_limit_buckets: Dict[str, str] = {}
@@ -287,4 +288,5 @@ class Bot:
         self.user_id = int(payload["user"]["id"])
         self.username = payload["user"]["username"]
         self.ready = True
+        self.application_id = int(payload["application"]["id"])
         print("Gateway ready message received")
