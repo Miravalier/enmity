@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict
 from datetime import datetime
+from typing import Any, Dict
+
 from .colors import Color
 
 

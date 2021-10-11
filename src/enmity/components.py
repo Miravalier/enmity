@@ -1,7 +1,9 @@
 from __future__ import annotations
-from enum import IntEnum
+
+import secrets
 from dataclasses import dataclass, field
-from typing import List
+from enum import IntEnum
+from typing import Any, List
 
 
 class ComponentType(IntEnum):
@@ -35,10 +37,13 @@ class SelectOption:
         return result
 
 
+def generate_component_id() -> str:
+    return secrets.token_hex(16)
+
+
 @dataclass
 class Component:
     type: ComponentType
-    custom_id: str = None
     disabled: bool = None
     style: ButtonStyle = None
     label: str = None
@@ -49,6 +54,7 @@ class Component:
     min_values: int = None
     max_values: int = None
     components: List[Component] = field(default_factory=list)
+    custom_id: str = field(default_factory=generate_component_id)
 
     def serialize(self):
         result = {"type": self.type}
@@ -81,24 +87,13 @@ class ActionRow(Component):
 
 
 class Button(Component):
-    def __init__(
-        self,
-        custom_id: str,
-        label: str,
-        *,
-        style: ButtonStyle = ButtonStyle.PRIMARY,
-        disabled: bool = None,
-        url: str = None
-    ):
-        super().__init__(
-            ComponentType.BUTTON, custom_id=custom_id, label=label, style=style, disabled=disabled, url=url
-        )
+    def __init__(self, label: str, *, style: ButtonStyle = ButtonStyle.PRIMARY, disabled: bool = None, url: str = None):
+        super().__init__(ComponentType.BUTTON, label=label, style=style, disabled=disabled, url=url)
 
 
 class SelectMenu(Component):
     def __init__(
         self,
-        custom_id: str,
         *options: SelectOption,
         disabled: bool = None,
         placeholder: str = None,
@@ -107,7 +102,6 @@ class SelectMenu(Component):
     ):
         super().__init__(
             ComponentType.SELECT_MENU,
-            custom_id=custom_id,
             options=options,
             disabled=disabled,
             placeholder=placeholder,

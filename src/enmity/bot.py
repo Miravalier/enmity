@@ -13,6 +13,7 @@ from aiohttp.client import ClientSession
 from aiohttp.client_ws import ClientWebSocketResponse
 
 from . import __version__
+from .components import ComponentType
 from .intents import Intent
 from .interactions import (
     Command,
@@ -84,7 +85,8 @@ class Bot:
         self.token: str = None
         self.headers: Dict[str, str] = {"User-Agent": USER_AGENT}
         self.event_handlers: Dict[str, Callable] = {}
-        self.interaction_handlers: Dict[str, Callable] = {}
+        self.command_handlers: Dict[str, Callable] = {}
+        self.component_handlers: Dict[str, Callable] = {}
 
     async def send(self, data: Any):
         await self.websocket.send_json(data)
@@ -136,7 +138,14 @@ class Bot:
 
     @aiohttp_session
     async def api_request(
-        self, method: str, endpoint: str, *, session: ClientSession, headers: Dict[str, str] = None, **kwargs
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        session: ClientSession,
+        headers: Dict[str, str] = None,
+        text_return: bool = False,
+        **kwargs,
     ) -> Any:
         rate_limit_key = f"{method}-{endpoint}"
         # Inject bot global headers into provided request headers
@@ -181,7 +190,10 @@ class Bot:
             # Raise any normal HTTP exceptions that may have occurred
             response.raise_for_status()
             # Return the json response
-            return await response.json()
+            if text_return:
+                return await response.text()
+            else:
+                return await response.json()
 
     def register_event(self, payload_type: str):
         def register_event_handler(func: Callable):
@@ -190,9 +202,8 @@ class Bot:
 
         return register_event_handler
 
-    async def register_interaction(self, command: Command):
-        self.interaction_handlers[command.name] = command.callback
-        # TODO only post command if the definition has changed
+    async def register_command(self, command: Command):
+        self.command_handlers[command.name] = command.callback
         for guild_id in self.guilds:
             await self.post_command(command, guild_id)
 
@@ -213,11 +224,8 @@ class Bot:
         self.last_heartbeat = datetime.now()
         # Update sequence number if present
         seq = event.get("s")
-        if seq:
-            if self.seq is None:
-                self.seq = seq
-            else:
-                self.seq = max(self.seq, seq)
+        if seq is not None:
+            self.seq = seq
         # Dispatch Event
         if event["op"] == Op.DISPATCH:
             event_handler = await self.get_event_handler(event["t"])
@@ -329,16 +337,16 @@ class Bot:
         pprint(payload)
 
     async def on_interaction_create(self, payload: Dict[str, Any]):
-        # Registered name of the interaction
-        interaction_name = payload["data"]["name"]
+        print("INTERACTION")
+        pprint(payload)
 
-        # Handle returned member or not
+        # Member will be present in a guild context, user otherwise
         if "member" in payload:
             member = payload["member"]
             user = payload["member"]["user"]
         else:
             member = {}
-            user = payload["user"]
+            user = payload.get("user", {})
 
         # Parse the interaction out from the JSON payload
         interaction = Interaction(
@@ -357,22 +365,45 @@ class Bot:
                 roles=[int(role) for role in member.get("roles", [])],
             ),
             token=payload["token"],
-            command_type=CommandType(payload["data"]["type"]),
             guild_id=int(payload.get("guild_id", 0)),
             channel_id=int(payload.get("channel_id", 0)),
             application_id=int(payload["application_id"]),
         )
 
-        target_id = payload["data"].get("target_id", None)
+        if interaction.type == InteractionType.APPLICATION_COMMAND:
+            await self.handle_application_command(payload["data"], interaction)
+        elif interaction.type == InteractionType.MESSAGE_COMPONENT:
+            await self.handle_message_component(payload["data"], interaction)
+
+    async def handle_message_component(self, data: Dict[str, Any], interaction: Interaction):
+        interaction.component_type = ComponentType(data["component_type"])
+        interaction.component_id = data["custom_id"]
+        component, component_handler = self.component_handlers.get(interaction.component_id, (None, None))
+        if component_handler is None:
+            print(f"Received unhandled component interaction: {interaction.component_id}")
+            pprint(data)
+        else:
+            interaction.target = component
+            response = await component_handler(interaction)
+            # Save component IDs for future interactions
+            if isinstance(response, InteractionCallback):
+                response.register_component_handler(self, component_handler)
+            # Send response object
+            await interaction.callback(InteractionCallbackType.UPDATE_MESSAGE, response)
+
+    async def handle_application_command(self, data: Dict[str, Any], interaction: Interaction):
+        interaction.command_type = CommandType(data["type"])
+        target_id = data.get("target_id", None)
 
         # Add Message Target
+        # TODO actually parse the message data
         if interaction.command_type == CommandType.MESSAGE:
             interaction.target = Message()
 
         # Add User Target
         elif interaction.command_type == CommandType.USER:
-            member = payload["data"].get("resolved", {}).get("members", {}).get(target_id, {})
-            user = payload["data"].get("resolved", {}).get("users", {}).get(target_id, {})
+            member = data.get("resolved", {}).get("members", {}).get(target_id, {})
+            user = data.get("resolved", {}).get("users", {}).get(target_id, {})
             interaction.target = User(
                 id=target_id,
                 username=user.get("username"),
@@ -386,25 +417,15 @@ class Bot:
             )
 
         # Call the appropriate interaction handler
-        interaction_handler = self.interaction_handlers.get(interaction_name)
-        if interaction_handler is None:
-            print(f"Received unhandled interaction: '{interaction_name}'")
-            pprint(payload)
+        command_name = data["name"]
+        command_handler = self.command_handlers.get(command_name)
+        if command_handler is None:
+            print(f"Received unhandled command: '{command_name}'")
+            pprint(data)
         else:
-            response = await interaction_handler(interaction)
-            # If no return, set a default message
-            if response is None:
-                response = {
-                    "content": "Success!",
-                }
-            # Convert string returns to response objects
-            elif isinstance(response, str):
-                response = {
-                    "content": response,
-                }
-            # Convert InteractionCallbacks to response objects
-            elif isinstance(response, InteractionCallback):
-                response = response.serialize()
-
+            response = await command_handler(interaction)
+            # Save component IDs for future interactions
+            if isinstance(response, InteractionCallback):
+                response.register_component_handler(self, command_handler)
             # Send response object
             await interaction.callback(InteractionCallbackType.CHANNEL_MESSAGE_WITH_SOURCE, response)

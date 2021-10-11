@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
 from typing import Any, Callable, Dict, List, Union
 
-from .components import Component
+from .components import Component, ComponentType
 from .embeds import Embed
 from .messages import Message
 from .users import User
@@ -101,20 +101,56 @@ class Interaction:
     id: int
     source: User
     token: str
-    command_type: CommandType = None
-    target: Union[User, Message] = None
     guild_id: int = None
     channel_id: int = None
     application_id: int = None
+    command_type: CommandType = None
+    target: Union[User, Message, Component] = None
+    component_type: ComponentType = None
+    component_id: str = None
 
     async def defer(self):
-        await self.callback(InteractionCallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE)
+        if self.type == InteractionType.APPLICATION_COMMAND:
+            await self.callback(InteractionCallbackType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE)
+        elif self.type == InteractionType.MESSAGE_COMPONENT:
+            await self.callback(InteractionCallbackType.DEFERRED_UPDATE_MESSAGE)
 
-    async def callback(self, response_type: InteractionCallbackType, response_data: Any = None):
+    async def callback(
+        self, response_type: InteractionCallbackType, response_data: Union[None, str, InteractionCallback] = None
+    ):
+        # Box up handler returns into valid response data
+        if response_type == InteractionCallbackType.CHANNEL_MESSAGE_WITH_SOURCE:
+            # If no return, set a default message
+            if response_data is None:
+                response_data = {
+                    "content": "An error occurred!",
+                }
+            # Convert string returns to response objects
+            elif isinstance(response_data, str):
+                response_data = {
+                    "content": response_data,
+                }
+            # Convert InteractionCallbacks to response objects
+            elif isinstance(response_data, InteractionCallback):
+                response_data = response_data.serialize()
+        elif response_type == InteractionCallbackType.UPDATE_MESSAGE:
+            if response_data is None:
+                await self.callback(InteractionCallbackType.DEFERRED_UPDATE_MESSAGE)
+                return
+            # Convert string returns to response objects
+            elif isinstance(response_data, str):
+                response_data = {
+                    "content": response_data,
+                }
+            # Convert InteractionCallbacks to response objects
+            elif isinstance(response_data, InteractionCallback):
+                response_data = response_data.serialize()
+        # Serialize response
         response = {"type": response_type}
         if response_data is not None:
             response["data"] = response_data
-        return await self.bot.post(f"/interactions/{self.id}/{self.token}/callback", json=response)
+        # Send response
+        return await self.bot.post(f"/interactions/{self.id}/{self.token}/callback", json=response, text_return=True)
 
 
 @dataclass
@@ -141,3 +177,9 @@ class InteractionCallback:
         if self.tts is not None:
             response["tts"] = self.tts
         return response
+
+    def register_component_handler(self, bot: Any, component_handler: Callable):
+        for component in self.components:
+            bot.component_handlers[component.custom_id] = component, component_handler
+            for component in component.components:
+                bot.component_handlers[component.custom_id] = component, component_handler
