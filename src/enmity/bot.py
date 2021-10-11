@@ -5,6 +5,7 @@ import sys
 from asyncio.tasks import Task
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pprint import pprint
 from typing import Any, Callable, Dict, Set
 
 import aiohttp
@@ -13,7 +14,17 @@ from aiohttp.client_ws import ClientWebSocketResponse
 
 from . import __version__
 from .intents import Intent
-from .op import Op
+from .interactions import (
+    Command,
+    CommandType,
+    Interaction,
+    InteractionCallback,
+    InteractionCallbackType,
+    InteractionType,
+)
+from .messages import Message
+from .opcodes import Op
+from .users import User
 
 PROJECT_URL = "https://github.com/Miravalier/enmity.git"
 USER_AGENT = " ".join(
@@ -72,7 +83,8 @@ class Bot:
         self.ws_url: str = None
         self.token: str = None
         self.headers: Dict[str, str] = {"User-Agent": USER_AGENT}
-        self.handlers: Dict[str, Callable] = {}
+        self.event_handlers: Dict[str, Callable] = {}
+        self.interaction_handlers: Dict[str, Callable] = {}
 
     async def send(self, data: Any):
         await self.websocket.send_json(data)
@@ -171,25 +183,31 @@ class Bot:
             # Return the json response
             return await response.json()
 
-    def register(self, payload_type: str):
-        def register_handler(func: Callable):
-            self.handlers[payload_type] = func
+    def register_event(self, payload_type: str):
+        def register_event_handler(func: Callable):
+            self.event_handlers[payload_type] = func
             return func
 
-        return register_handler
+        return register_event_handler
 
-    async def get_handler(self, payload_type: str):
+    def register_interaction(self, interaction_name: str):
+        def register_interaction_handler(func: Callable):
+            self.interaction_handlers[interaction_name] = func
+            return func
+
+        return register_interaction_handler
+
+    async def get_event_handler(self, payload_type: str) -> Callable:
         # Check handler cache
-        if payload_type in self.handlers:
-            return self.handlers[payload_type]
+        if payload_type in self.event_handlers:
+            return self.event_handlers[payload_type]
         # Check for on_<payload_type> method and cache it if found
         handler = getattr(self, f"on_{payload_type.lower()}", None)
-        # Fallback to just printing
-        if handler is None:
-            print(f"Unrecognized payload type {payload_type}")
-        else:
-            self.handlers[payload_type] = handler
+        if handler is not None:
+            self.event_handlers[payload_type] = handler
             return handler
+        # Fallback to calling on_unknown_message
+        return functools.partial(self.on_unknown_message, payload_type)
 
     @aiohttp_session
     async def handle_event(self, event: Dict, *, session: ClientSession) -> None:
@@ -203,7 +221,7 @@ class Bot:
                 self.seq = max(self.seq, seq)
         # Dispatch Event
         if event["op"] == Op.DISPATCH:
-            event_handler = await self.get_handler(event["t"])
+            event_handler = await self.get_event_handler(event["t"])
             await event_handler(event["d"])
         # Gateway Hello
         elif event["op"] == Op.HELLO:
@@ -281,6 +299,25 @@ class Bot:
                 else:
                     raise TypeError(f"Unrecognized ws message type: {ws_message.type}")
 
+    @aiohttp_session
+    async def post_command(self, command: Command, guild_id: int = None, *, session: ClientSession):
+        if guild_id is None:
+            return await self.post(
+                f"/applications/{self.application_id}/commands",
+                json=command.serialize(),
+                session=session,
+            )
+        else:
+            return await self.post(
+                f"/applications/{self.application_id}/guilds/{guild_id}/commands",
+                json=command.serialize(),
+                session=session,
+            )
+
+    async def on_unknown_message(self, payload_type: str, payload: Dict[str, Any]):
+        print(f"Unrecognized payload type {payload_type}")
+        pprint(payload)
+
     async def on_ready(self, payload: Dict[str, Any]):
         for guild_data in payload["guilds"]:
             self.guilds.add(int(guild_data["id"]))
@@ -289,4 +326,86 @@ class Bot:
         self.username = payload["user"]["username"]
         self.ready = True
         self.application_id = int(payload["application"]["id"])
-        print("Gateway ready message received")
+        print("Gateway READY message received")
+        pprint(payload)
+
+    async def on_interaction_create(self, payload: Dict[str, Any]):
+        # Registered name of the interaction
+        interaction_name = payload["data"]["name"]
+
+        # Handle returned member or not
+        if "member" in payload:
+            member = payload["member"]
+            user = payload["member"]["user"]
+        else:
+            member = {}
+            user = payload["user"]
+
+        # Parse the interaction out from the JSON payload
+        interaction = Interaction(
+            bot=self,
+            type=InteractionType(payload["type"]),
+            id=int(payload["id"]),
+            source=User(
+                id=int(user.get("id", 0)),
+                username=user.get("username"),
+                discriminator=user.get("discriminator"),
+                nickname=member.get("nick"),
+                bot=user.get("bot", False),
+                avatar=user.get("avatar"),
+                deaf=member.get("deaf"),
+                mute=member.get("mute"),
+                roles=[int(role) for role in member.get("roles", [])],
+            ),
+            token=payload["token"],
+            command_type=CommandType(payload["data"]["type"]),
+            guild_id=int(payload.get("guild_id", 0)),
+            channel_id=int(payload.get("channel_id", 0)),
+            application_id=int(payload["application_id"]),
+        )
+
+        target_id = payload["data"].get("target_id", None)
+
+        # Add Message Target
+        if interaction.command_type == CommandType.MESSAGE:
+            interaction.target = Message()
+
+        # Add User Target
+        elif interaction.command_type == CommandType.USER:
+            member = payload["data"].get("resolved", {}).get("members", {}).get(target_id, {})
+            user = payload["data"].get("resolved", {}).get("users", {}).get(target_id, {})
+            interaction.target = User(
+                id=target_id,
+                username=user.get("username"),
+                discriminator=user.get("discriminator"),
+                nickname=member.get("nick"),
+                bot=user.get("bot", False),
+                avatar=user.get("avatar"),
+                deaf=member.get("deaf"),
+                mute=member.get("mute"),
+                roles=[int(role) for role in member.get("roles", [])],
+            )
+
+        # Call the appropriate interaction handler
+        interaction_handler = self.interaction_handlers.get(interaction_name)
+        if interaction_handler is None:
+            print(f"Received unhandled interaction: '{interaction_name}'")
+            pprint(payload)
+        else:
+            response = await interaction_handler(interaction)
+            # If no return, set a default message
+            if response is None:
+                response = {
+                    "content": "Success!",
+                }
+            # Convert string returns to response objects
+            elif isinstance(response, str):
+                response = {
+                    "content": response,
+                }
+            # Convert InteractionCallbacks to response objects
+            elif isinstance(response, InteractionCallback):
+                response = response.serialize()
+
+            # Send response object
+            await interaction.callback(InteractionCallbackType.CHANNEL_MESSAGE_WITH_SOURCE, response)
