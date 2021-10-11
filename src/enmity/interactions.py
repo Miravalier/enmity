@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
-from typing import Any, Dict, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 from .components import Component
 from .embeds import Embed
@@ -79,6 +79,7 @@ class Command:
     description: str = ""
     default_permission: bool = True
     parameters: List[Parameter] = field(default_factory=list)
+    callback: Callable = None
 
     def serialize(self):
         result = {

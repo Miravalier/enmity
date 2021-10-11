@@ -190,12 +190,11 @@ class Bot:
 
         return register_event_handler
 
-    def register_interaction(self, interaction_name: str):
-        def register_interaction_handler(func: Callable):
-            self.interaction_handlers[interaction_name] = func
-            return func
-
-        return register_interaction_handler
+    async def register_interaction(self, command: Command):
+        self.interaction_handlers[command.name] = command.callback
+        # TODO only post command if the definition has changed
+        for guild_id in self.guilds:
+            await self.post_command(command, guild_id)
 
     async def get_event_handler(self, payload_type: str) -> Callable:
         # Check handler cache
