@@ -70,6 +70,7 @@ class Parameter:
             result["required"] = self.required
         if self.choices:
             result["choices"] = [{"name": key, "value": value} for key, value in self.choices.items()]
+        return result
 
 
 @dataclass
